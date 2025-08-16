@@ -1,29 +1,33 @@
 import mimetypes
 import pathlib
 import json
-from datetime import datetime
+import socket
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import urllib.parse
 from jinja2 import Environment, FileSystemLoader
+from pymongo import MongoClient
 
 
 SERVER_PORT = 3000
 ASSETS_PATH = "./assets"
-MESSAGE_STORAGE = "storage/data.json"
+
+# Налаштування для socket-сервера
+SOCKET_HOST = "localhost"
+SOCKET_PORT = 5000
 
 
 class HttpHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         data = self.rfile.read(int(self.headers["Content-Length"]))
-        print(data)
         data_parse = urllib.parse.unquote_plus(data.decode())
-        print(data_parse)
         data_dict = {
             key: value for key, value in [el.split("=") for el in data_parse.split("&")]
         }
-        print(data_dict)
+
+        # Відправка даних у socket-сервер
         self.save_messages(data_dict)
 
+        # Редірект назад на головну
         self.send_response(302)
         self.send_header("Location", "/")
         self.end_headers()
@@ -66,39 +70,25 @@ class HttpHandler(BaseHTTPRequestHandler):
             self.wfile.write(file.read())
 
     def save_messages(self, data: dict) -> None:
-        my_file = pathlib.Path(MESSAGE_STORAGE)
-
-        storage = None
-
-        if my_file.is_file():
-            with open(MESSAGE_STORAGE, "r", encoding="utf-8") as json_data:
-                try:
-                    storage = json.load(json_data)
-                except Exception as e:
-                    print(f"\tError: {e}")
-                json_data.close()
-
-        messages = {}
-        if storage:
-            messages = storage
-
-        messages.update({f"{datetime.now()}": data})
-
-        with open(MESSAGE_STORAGE, "w", encoding="utf-8") as fh:
-            json.dump(messages, fh, ensure_ascii=False, indent=4)
+        """
+        Замість JSON одразу — відправляємо дані на socket-сервер.
+        """
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.connect((SOCKET_HOST, SOCKET_PORT))
+                sock.sendall(json.dumps(data).encode("utf-8"))
+        except ConnectionRefusedError:
+            print("❌ Socket-сервер не запущено! Дані не надіслані.")
 
     def read_messages(self) -> None:
-        my_file = pathlib.Path(MESSAGE_STORAGE)
+        """
+        Читаємо повідомлення з MongoDB.
+        """
+        client = MongoClient("mongodb://localhost:27017/")
+        db = client["messages_db"]
+        collection = db["messages"]
 
-        messages = {}
-
-        if my_file.is_file():
-            with open(MESSAGE_STORAGE, "r", encoding="utf-8") as json_data:
-                try:
-                    messages = json.load(json_data)
-                except Exception as e:
-                    print(f"\tError: {e}")
-                json_data.close()
+        messages = list(collection.find({}, {"_id": 0}))
 
         self.send_html_file("read.html", variables={"messages": messages})
 
@@ -107,9 +97,11 @@ def run(server_class=HTTPServer, handler_class=HttpHandler):
     server_address = ("", SERVER_PORT)
     http = server_class(server_address, handler_class)
     try:
+        print(f"🌍 HTTP-сервер запущено на http://localhost:{SERVER_PORT}")
         http.serve_forever()
     except KeyboardInterrupt:
         http.server_close()
+        print("\n🛑 HTTP-сервер зупинено")
 
 
 if __name__ == "__main__":
